@@ -1,0 +1,398 @@
+# Google Cloud Workflows - Main Content Creation Pipeline
+# Deploy with: gcloud workflows deploy content-pipeline --source=main.yaml --location=us-central1
+
+main:
+  params: [args]
+  steps:
+    - init:
+        assign:
+          - project: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - location: "us-central1"
+          - channel_slug: ${default(map.get(args, "channel_slug"), "circuit-myth")}
+          - topic: ${default(map.get(args, "topic"), "")}
+          - aspect_ratio: ${default(map.get(args, "aspect_ratio"), "9:16")}
+          - duration_s: ${default(map.get(args, "duration_s"), 60)}
+          - session_id: ${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
+    
+    # Step 1: Fetch Channel Profile from Firestore
+    - fetchChannelProfile:
+        call: googleapis.firestore.v1.projects.databases.documents.get
+        args:
+          name: ${"projects/" + project + "/databases/(default)/documents/channels/" + channel_slug}
+        result: channelDoc
+    
+    # Step 2: Fetch Prompts
+    - fetchPrompts:
+        parallel:
+          for:
+            value: promptId
+            in: ["showrunner", "research", "scriptwriter", "visual_director", "thumbnail_director", "tts", "editor", "distribution", "compliance"]
+            steps:
+              - getPrompt:
+                  call: googleapis.firestore.v1.projects.databases.documents.get
+                  args:
+                    name: ${"projects/" + project + "/databases/(default)/documents/channels/" + channel_slug + "/prompts/" + promptId}
+                  result: promptDoc
+              - assignPrompt:
+                  assign:
+                    - prompts[promptId]: ${promptDoc}
+    
+    # Step 3: Generate Topic (if not provided)
+    - generateTopic:
+        switch:
+          - condition: ${topic == ""}
+            steps:
+              - callGeminiForTopic:
+                  call: http.post
+                  args:
+                    url: ${"https://" + location + "-aiplatform.googleapis.com/v1/projects/" + project + "/locations/" + location + "/publishers/google/models/gemini-2.5-flash:generateContent"}
+                    auth:
+                      type: OAuth2
+                    body:
+                      contents:
+                        - role: "user"
+                          parts:
+                            - text: ${"Generate a trending video topic for a " + channelDoc.fields.niche.stringValue + " channel. Pillars: " + text.join(", ", channelDoc.fields.pillars.arrayValue.values) + ". Return only the topic title."}
+                      generationConfig:
+                        temperature: 0.9
+                        maxOutputTokens: 100
+                  result: topicResponse
+              - extractTopic:
+                  assign:
+                    - topic: ${topicResponse.body.candidates[0].content.parts[0].text}
+    
+    # Step 4: Creative Director (Showrunner)
+    - callShowrunner:
+        call: http.post
+        args:
+          url: ${"https://" + location + "-aiplatform.googleapis.com/v1/projects/" + project + "/locations/" + location + "/publishers/google/models/gemini-2.5-pro:generateContent"}
+          auth:
+            type: OAuth2
+          body:
+            contents:
+              - role: "user"
+                parts:
+                  - text: ${prompts.showrunner.fields.system_template.stringValue + "\n\nTopic: " + topic + "\nDuration: " + string(duration_s) + "s"}
+            generationConfig:
+              temperature: 0.8
+              maxOutputTokens: 2048
+              responseMimeType: "application/json"
+        result: briefResponse
+    
+    - parseBrief:
+        assign:
+          - brief: ${json.decode(briefResponse.body.candidates[0].content.parts[0].text)}
+    
+    # Step 5 & 6: Research and Script (Parallel)
+    - parallelResearchAndScript:
+        parallel:
+          branches:
+            # Research Branch
+            - researchBranch:
+                steps:
+                  - searchWeb:
+                      call: http.get
+                      args:
+                        url: "https://customsearch.googleapis.com/customsearch/v1"
+                        query:
+                          key: ${sys.get_env("CSE_API_KEY")}
+                          cx: ${sys.get_env("CSE_CX")}
+                          q: ${topic}
+                          num: 10
+                          safe: "active"
+                          dateRestrict: "m6"
+                      result: searchResults
+                  
+                  - summarizeResearch:
+                      call: http.post
+                      args:
+                        url: ${"https://" + location + "-aiplatform.googleapis.com/v1/projects/" + project + "/locations/" + location + "/publishers/google/models/gemini-2.5-flash:generateContent"}
+                        auth:
+                          type: OAuth2
+                        body:
+                          contents:
+                            - role: "user"
+                              parts:
+                                - text: ${prompts.research.fields.system_template.stringValue + "\n\nSearch Results:\n" + json.encode(searchResults.body.items)}
+                          generationConfig:
+                            temperature: 0.3
+                            maxOutputTokens: 2048
+                            responseMimeType: "application/json"
+                      result: researchResponse
+                  
+                  - assignResearch:
+                      assign:
+                        - research: ${json.decode(researchResponse.body.candidates[0].content.parts[0].text)}
+            
+            # Script Branch (waits for brief)
+            - scriptBranch:
+                steps:
+                  - generateScript:
+                      call: http.post
+                      args:
+                        url: ${"https://" + location + "-aiplatform.googleapis.com/v1/projects/" + project + "/locations/" + location + "/publishers/google/models/gemini-2.5-pro:generateContent"}
+                        auth:
+                          type: OAuth2
+                        body:
+                          contents:
+                            - role: "user"
+                              parts:
+                                - text: ${prompts.scriptwriter.fields.system_template.stringValue + "\n\nBrief:\n" + json.encode(brief) + "\n\nDuration: " + string(duration_s) + "s"}
+                          generationConfig:
+                            temperature: 0.7
+                            maxOutputTokens: 3000
+                            responseMimeType: "application/json"
+                      result: scriptResponse
+                  
+                  - assignScript:
+                      assign:
+                        - script: ${json.decode(scriptResponse.body.candidates[0].content.parts[0].text)}
+    
+    # Step 7: Compliance Check
+    - complianceCheck:
+        call: http.post
+        args:
+          url: ${"https://" + location + "-aiplatform.googleapis.com/v1/projects/" + project + "/locations/" + location + "/publishers/google/models/gemini-2.5-flash:generateContent"}
+          auth:
+            type: OAuth2
+          body:
+            contents:
+              - role: "user"
+                parts:
+                  - text: ${prompts.compliance.fields.system_template.stringValue + "\n\nScript:\n" + json.encode(script)}
+            generationConfig:
+              temperature: 0.2
+              maxOutputTokens: 1024
+              responseMimeType: "application/json"
+        result: complianceResponse
+    
+    - checkComplianceScore:
+        assign:
+          - compliance: ${json.decode(complianceResponse.body.candidates[0].content.parts[0].text)}
+        next: evaluateCompliance
+    
+    - evaluateCompliance:
+        switch:
+          - condition: ${compliance.compliance_score < 0.7}
+            raise:
+              message: ${"Compliance check failed: " + json.encode(compliance.issues)}
+    
+    # Step 8: Generate Media Assets (Parallel)
+    - generateMediaAssets:
+        parallel:
+          branches:
+            # Veo Video Generation
+            - veoVideos:
+                steps:
+                  - buildVeoPrompts:
+                      call: http.post
+                      args:
+                        url: ${"https://" + location + "-aiplatform.googleapis.com/v1/projects/" + project + "/locations/" + location + "/publishers/google/models/gemini-2.5-flash:generateContent"}
+                        auth:
+                          type: OAuth2
+                        body:
+                          contents:
+                            - role: "user"
+                              parts:
+                                - text: ${prompts.visual_director.fields.system_template.stringValue + "\n\nScript beats:\n" + json.encode(brief.beats)}
+                          generationConfig:
+                            temperature: 0.8
+                            maxOutputTokens: 2048
+                            responseMimeType: "application/json"
+                      result: veoPromptsResponse
+                  
+                  - parseVeoPrompts:
+                      assign:
+                        - veoShots: ${json.decode(veoPromptsResponse.body.candidates[0].content.parts[0].text).shots}
+                  
+                  - submitVeoJobs:
+                      parallel:
+                        for:
+                          value: shot
+                          in: ${veoShots}
+                          range: [0, 4]  # Limit to 5 shots
+                          steps:
+                            - createVeoJob:
+                                call: http.post
+                                args:
+                                  url: ${"https://" + location + "-aiplatform.googleapis.com/v1/projects/" + project + "/locations/" + location + "/publishers/google/models/veo-3.0-generate-001:predictLongRunning"}
+                                  auth:
+                                    type: OAuth2
+                                  body:
+                                    instances:
+                                      - prompt: ${shot.prompt}
+                                        parameters:
+                                          aspectRatio: ${aspect_ratio}
+                                          sampleCount: 1
+                                          resolution: "1080p"
+                                          duration: ${default(shot.duration, 5)}
+                                result: veoJob
+                            - assignVeoJob:
+                                assign:
+                                  - veoJobs[${index}]: ${veoJob.body.name}
+            
+            # Thumbnail Generation
+            - thumbnails:
+                steps:
+                  - generateThumbnails:
+                      parallel:
+                        for:
+                          value: variant
+                          in: ["A", "B", "C"]
+                          steps:
+                            - createThumbnail:
+                                call: http.post
+                                args:
+                                  url: ${"https://" + location + "-aiplatform.googleapis.com/v1/projects/" + project + "/locations/" + location + "/publishers/google/models/imagen-3.0-generate-001:predict"}
+                                  auth:
+                                    type: OAuth2
+                                  body:
+                                    instances:
+                                      - prompt: ${"Thumbnail variant " + variant + " for: " + topic + ". Style: " + channelDoc.fields.visual.mapValue.fields.palette.arrayValue.values}
+                                        parameters:
+                                          sampleCount: 1
+                                          aspectRatio: "16:9"
+                                          addWatermark: false
+                                result: thumbnailResponse
+                            - assignThumbnail:
+                                assign:
+                                  - thumbnails[variant]: ${thumbnailResponse.body.predictions[0].bytesBase64Encoded}
+            
+            # Voice Generation
+            - voiceGeneration:
+                steps:
+                  - synthesizeVoice:
+                      call: googleapis.texttospeech.v1.text.synthesize
+                      args:
+                        body:
+                          input:
+                            ssml: ${script.ssml}
+                          voice:
+                            languageCode: "en-US"
+                            name: "en-US-Neural2-G"
+                          audioConfig:
+                            audioEncoding: "LINEAR16"
+                            speakingRate: 1.1
+                      result: audioResponse
+                  - assignAudio:
+                      assign:
+                        - audioBase64: ${audioResponse.audioContent}
+    
+    # Step 9: Save Assets to Cloud Storage
+    - saveAssets:
+        parallel:
+          branches:
+            - saveAudio:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${channelDoc.fields.gcs_bucket.stringValue.replace("gs://", "")}
+                  name: ${"sessions/" + session_id + "/audio/voiceover.wav"}
+                  uploadType: "media"
+                  body: ${base64.decode(audioBase64)}
+                result: audioObject
+            
+            - saveThumbnails:
+                parallel:
+                  for:
+                    value: variant
+                    in: ["A", "B", "C"]
+                    steps:
+                      - uploadThumbnail:
+                          call: googleapis.storage.v1.objects.insert
+                          args:
+                            bucket: ${channelDoc.fields.gcs_bucket.stringValue.replace("gs://", "")}
+                            name: ${"sessions/" + session_id + "/thumbnails/variant_" + variant + ".png"}
+                            uploadType: "media"
+                            body: ${base64.decode(thumbnails[variant])}
+    
+    # Step 10: Wait for Veo Jobs to Complete
+    - waitForVeoJobs:
+        parallel:
+          for:
+            value: jobName
+            in: ${veoJobs}
+            steps:
+              - pollVeoJob:
+                  call: sys.sleep
+                  args:
+                    seconds: 30  # Simplified - in production use proper polling
+              - checkVeoStatus:
+                  call: http.get
+                  args:
+                    url: ${"https://" + location + "-aiplatform.googleapis.com/v1/" + jobName}
+                    auth:
+                      type: OAuth2
+                  result: veoStatus
+              # In production, extract video URI from completed job
+    
+    # Step 11: Create Render Job
+    - createRenderJob:
+        call: http.post
+        args:
+          url: ${sys.get_env("RENDERER_URL") + "/render"}
+          auth:
+            type: OAuth2
+          body:
+            job_id: ${session_id}
+            channel_slug: ${channel_slug}
+            edl:
+              - clip_uri: ${"gs://" + channelDoc.fields.gcs_bucket.stringValue.replace("gs://", "") + "/sessions/" + session_id + "/videos/shot_0.mp4"}
+                start_time: 0
+                end_time: 5
+                transition: "fade"
+            voiceover_uri: ${"gs://" + channelDoc.fields.gcs_bucket.stringValue.replace("gs://", "") + "/sessions/" + session_id + "/audio/voiceover.wav"}
+            output_bucket: ${channelDoc.fields.gcs_bucket.stringValue.replace("gs://", "")}
+            output_path: ${"renders/" + session_id + "/master.mp4"}
+            aspect_ratio: ${aspect_ratio}
+            resolution: "1080p"
+            enable_captions: true
+        result: renderJob
+    
+    # Step 12: Generate Distribution Metadata
+    - generateDistribution:
+        call: http.post
+        args:
+          url: ${"https://" + location + "-aiplatform.googleapis.com/v1/projects/" + project + "/locations/" + location + "/publishers/google/models/gemini-2.5-flash:generateContent"}
+          auth:
+            type: OAuth2
+          body:
+            contents:
+              - role: "user"
+                parts:
+                  - text: ${prompts.distribution.fields.system_template.stringValue + "\n\nTopic: " + topic + "\n\nHooks: " + json.encode(brief.hooks)}
+            generationConfig:
+              temperature: 0.7
+              maxOutputTokens: 1024
+              responseMimeType: "application/json"
+        result: distributionResponse
+    
+    - parseDistribution:
+        assign:
+          - distribution: ${json.decode(distributionResponse.body.candidates[0].content.parts[0].text)}
+    
+    # Step 13: Save Session to Firestore
+    - saveSession:
+        call: googleapis.firestore.v1.projects.databases.documents.createDocument
+        args:
+          parent: ${"projects/" + project + "/databases/(default)/documents"}
+          collectionId: "production_sessions"
+          documentId: ${session_id}
+          body:
+            fields:
+              session_id: { stringValue: ${session_id} }
+              channel_slug: { stringValue: ${channel_slug} }
+              topic: { stringValue: ${topic} }
+              status: { stringValue: "rendering" }
+              created_at: { timestampValue: ${time.format(sys.now())} }
+              render_job_id: { stringValue: ${renderJob.body.job_id} }
+              distribution: { mapValue: { fields: ${distribution} } }
+    
+    # Step 14: Return Results
+    - returnResults:
+        return:
+          session_id: ${session_id}
+          channel: ${channel_slug}
+          topic: ${topic}
+          render_job: ${renderJob.body}
+          distribution: ${distribution}
+          message: "Content creation pipeline completed successfully"

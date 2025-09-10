@@ -1,0 +1,95 @@
+# Node modules
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment files
+.env
+.env.local
+.env.*.local
+config/.env
+config/.env.backup
+
+# Sensitive credentials - NEVER commit these
+config/service_account.json
+config/service_account_pulled.json
+config/oauth_credentials.json
+config/oauth_credentials_pulled.json
+*.key
+*.pem
+*.p12
+
+# Google Cloud
+.gcloud/
+.gsutil/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Testing
+coverage/
+.nyc_output
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Rendered videos (too large)
+renders/
+*.mp4
+*.mov
+*.avi
+*.webm
+
+# Cache
+.cache/
+.parcel-cache/
+
+# OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Backup files
+*.backup
+*.bak
+
+# Local development
+.local/

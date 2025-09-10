@@ -1,0 +1,9 @@
+{
+  "name": "dpgen-firestore-seeds",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@google-cloud/firestore": "^7.10.0",
+    "dotenv": "^16.4.5"
+  }
+}

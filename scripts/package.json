@@ -1,0 +1,11 @@
+{
+  "name": "dpgen-scripts",
+  "version": "1.0.0",
+  "description": "Setup scripts for DPGen pipeline",
+  "scripts": {
+    "setup": "node setup-with-node.js"
+  },
+  "dependencies": {
+    "googleapis": "^128.0.0"
+  }
+}
