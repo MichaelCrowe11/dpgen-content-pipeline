@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# DPGen Pipeline Deployment Script
+# DeepParallel Pipeline Deployment Script
 # Deploys the complete content creation pipeline to Google Cloud
 
 set -e
@@ -16,7 +16,7 @@ PROJECT_ID=${GCP_PROJECT_ID:-""}
 LOCATION=${GCP_LOCATION:-"us-central1"}
 RENDERER_URL=""
 
-echo -e "${GREEN}🚀 DPGen Pipeline Deployment${NC}"
+echo -e "${GREEN}🚀 DeepParallel Pipeline Deployment${NC}"
 echo "================================"
 
 # Check prerequisites
@@ -71,46 +71,43 @@ enable_apis() {
     echo -e "${GREEN}✓ APIs enabled${NC}"
 }
 
-# Create service account
-create_service_account() {
-    echo -e "\n${YELLOW}Creating service account...${NC}"
-    
-    SA_NAME="dpgen-pipeline"
-    SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
-    
-    # Create service account
-    gcloud iam service-accounts create $SA_NAME \
-        --display-name="DPGen Pipeline Service Account" \
-        --project=$PROJECT_ID 2>/dev/null || echo "Service account already exists"
-    
-    # Grant roles
-    ROLES=(
-        "roles/aiplatform.user"
-        "roles/datastore.user"
-        "roles/storage.admin"
-        "roles/run.invoker"
-        "roles/workflows.invoker"
-        "roles/bigquery.dataEditor"
+# Create service accounts (workflow + renderer) with least privilege
+create_service_accounts() {
+    echo -e "\n${YELLOW}Creating service accounts...${NC}"
+
+    WORKFLOW_SA_NAME=${WORKFLOW_SA_NAME:-"deepparallel-workflow"}
+    RENDERER_SA_NAME=${RENDERER_SA_NAME:-"deepparallel-renderer"}
+    WORKFLOW_SA_EMAIL="${WORKFLOW_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+    RENDERER_SA_EMAIL="${RENDERER_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+    gcloud iam service-accounts create $WORKFLOW_SA_NAME --display-name "Workflow Orchestrator SA" --project $PROJECT_ID 2>/dev/null || echo "Workflow SA exists"
+    gcloud iam service-accounts create $RENDERER_SA_NAME --display-name "Renderer Service SA" --project $PROJECT_ID 2>/dev/null || echo "Renderer SA exists"
+
+    WORKFLOW_ROLES=(
+        roles/aiplatform.user
+        roles/datastore.user
+        roles/run.invoker
+        roles/workflows.invoker
+        roles/storage.objectViewer
+        roles/secretmanager.secretAccessor
+        roles/logging.logWriter
+        roles/bigquery.dataEditor
     )
-    
-    for role in "${ROLES[@]}"; do
-        echo "  Granting $role..."
-        gcloud projects add-iam-policy-binding $PROJECT_ID \
-            --member="serviceAccount:${SA_EMAIL}" \
-            --role="$role" \
-            --quiet
+    RENDERER_ROLES=(
+        roles/storage.objectAdmin
+        roles/datastore.user
+        roles/secretmanager.secretAccessor
+        roles/logging.logWriter
+    )
+
+    for r in "${WORKFLOW_ROLES[@]}"; do
+        gcloud projects add-iam-policy-binding $PROJECT_ID --member "serviceAccount:${WORKFLOW_SA_EMAIL}" --role "$r" --quiet
     done
-    
-    # Create and download key
-    KEY_FILE="config/service_account.json"
-    if [ ! -f "$KEY_FILE" ]; then
-        gcloud iam service-accounts keys create $KEY_FILE \
-            --iam-account=$SA_EMAIL \
-            --project=$PROJECT_ID
-        echo -e "${GREEN}✓ Service account key saved to $KEY_FILE${NC}"
-    fi
-    
-    echo -e "${GREEN}✓ Service account created${NC}"
+    for r in "${RENDERER_ROLES[@]}"; do
+        gcloud projects add-iam-policy-binding $PROJECT_ID --member "serviceAccount:${RENDERER_SA_EMAIL}" --role "$r" --quiet
+    done
+
+    echo -e "${GREEN}✓ Service accounts configured${NC}"
 }
 
 # Create storage buckets
@@ -118,16 +115,16 @@ create_storage() {
     echo -e "\n${YELLOW}Creating storage buckets...${NC}"
     
     BUCKETS=(
-        "dpgen-shared"
-        "dpgen-circuit-myth"
-        "dpgen-deeptime"
-        "dpgen-zero-view"
-        "dpgen-map-oddities"
-        "dpgen-space-minute"
-        "dpgen-design-details"
-        "dpgen-pattern-language"
-        "dpgen-econ-snack"
-        "dpgen-renderer"
+        "deepparallel-shared"
+        "deepparallel-circuit-myth"
+        "deepparallel-deeptime"
+        "deepparallel-zero-view"
+        "deepparallel-map-oddities"
+        "deepparallel-space-minute"
+        "deepparallel-design-details"
+        "deepparallel-pattern-language"
+        "deepparallel-econ-snack"
+        "deepparallel-renderer"
     )
     
     for bucket in "${BUCKETS[@]}"; do
@@ -164,18 +161,21 @@ deploy_renderer() {
     cd renderer
     
     # Build and deploy
-    gcloud run deploy dpgen-renderer \
+    gcloud run deploy deepparallel-renderer \
         --source . \
         --region=$LOCATION \
         --memory=2Gi \
         --cpu=2 \
         --timeout=600 \
         --allow-unauthenticated \
+        --service-account "${RENDERER_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
         --project=$PROJECT_ID \
         --quiet
+
+        echo "(Optional) Re-run with --set-secrets CSE_API_KEY=CSE_API_KEY:latest,etc once secrets are created."
     
     # Get service URL
-    RENDERER_URL=$(gcloud run services describe dpgen-renderer \
+    RENDERER_URL=$(gcloud run services describe deepparallel-renderer \
         --region=$LOCATION \
         --project=$PROJECT_ID \
         --format='value(status.url)')
@@ -188,18 +188,25 @@ deploy_renderer() {
 # Deploy Cloud Workflows
 deploy_workflows() {
     echo -e "\n${YELLOW}Deploying Cloud Workflows...${NC}"
-    
-    # Update workflow with renderer URL
-    sed -i "s|RENDERER_URL_PLACEHOLDER|$RENDERER_URL|g" workflows-gcp/main.yaml
-    
-    # Deploy main workflow
+
+    TEMPLATE="workflows-gcp/main.yaml.tmpl"
+    RENDERED="workflows-gcp/main.rendered.yaml"
+
+    if [ ! -f "$TEMPLATE" ]; then
+        echo -e "${RED}Template $TEMPLATE not found${NC}"; exit 1;
+    fi
+
+    cp "$TEMPLATE" "$RENDERED"
+    # Inject renderer URL
+    sed -i "s|__RENDERER_URL__|$RENDERER_URL|g" "$RENDERED"
+
     gcloud workflows deploy content-pipeline \
-        --source=workflows-gcp/main.yaml \
+        --source="$RENDERED" \
         --location=$LOCATION \
-        --service-account="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+        --service-account="${WORKFLOW_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
         --project=$PROJECT_ID
-    
-    echo -e "${GREEN}✓ Workflows deployed${NC}"
+
+    echo -e "${GREEN}✓ Workflows deployed (source: $RENDERED)${NC}"
 }
 
 # Setup Cloud Scheduler
@@ -221,7 +228,7 @@ setup_scheduler() {
             --http-method=POST \
             --headers="Content-Type=application/json" \
             --message-body="{\"argument\":\"{\\\"channel_slug\\\":\\\"${channel}\\\"}\"}" \
-            --oauth-service-account-email="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+            --oauth-service-account-email="${WORKFLOW_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
             --project=$PROJECT_ID 2>/dev/null || echo "    Schedule already exists"
         
         # Evening schedule
@@ -233,7 +240,7 @@ setup_scheduler() {
             --http-method=POST \
             --headers="Content-Type=application/json" \
             --message-body="{\"argument\":\"{\\\"channel_slug\\\":\\\"${channel}\\\"}\"}" \
-            --oauth-service-account-email="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
+            --oauth-service-account-email="${WORKFLOW_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
             --project=$PROJECT_ID 2>/dev/null || echo "    Schedule already exists"
     done
     
@@ -283,7 +290,7 @@ main() {
     fi
     
     enable_apis
-    create_service_account
+    create_service_accounts
     create_storage
     init_firestore
     deploy_renderer

@@ -7,6 +7,7 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime
 import asyncio
 from pathlib import Path
+import time
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -15,10 +16,15 @@ from google.cloud import storage
 from google.cloud import firestore
 import ffmpeg
 import webvtt
+from logging_utils import get_logger
 
-app = FastAPI(title="DPGen Video Renderer", version="1.0.0")
+app = FastAPI(title="DeepParallel Video Renderer", version="1.0.0")
 storage_client = storage.Client()
 db = firestore.Client()
+logger = get_logger()
+
+# Quota configuration
+MAX_DAILY_VIDEOS_PER_CHANNEL = int(os.getenv("MAX_DAILY_VIDEOS_PER_CHANNEL", "2"))
 
 # Models
 class Segment(BaseModel):
@@ -58,6 +64,56 @@ class RenderStatus(BaseModel):
 
 # In-memory job tracker (use Redis in production)
 jobs: Dict[str, RenderStatus] = {}
+MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT_RENDERS", "3"))
+_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+
+def persist_job_status(job: RenderStatus):
+    """Persist job status snapshot to Firestore (idempotent)."""
+    try:
+        doc_ref = db.collection("renders").document(job.job_id)
+        payload = {
+            "job_id": job.job_id,
+            "status": job.status,
+            "progress": job.progress,
+            "output_uri": job.output_uri,
+            "error": job.error,
+            "channel_slug": job.metadata.get("channel_slug") if job.metadata else None,
+            "updated_at": datetime.utcnow()
+        }
+        # Remove None values
+        payload = {k: v for k, v in payload.items() if v is not None}
+        doc_ref.set(payload, merge=True)
+    except Exception as e:
+        logger.error("persist_failed", extra={"job_id": job.job_id, "error": str(e)})
+
+def update_session_status(session_id: str, status: str, output_uri: Optional[str] = None, error: Optional[str] = None):
+    """Update production session document status if it exists."""
+    try:
+        doc_ref = db.collection("production_sessions").document(session_id)
+        payload: Dict[str, Any] = {"status": status, "updated_at": datetime.utcnow()}
+        if output_uri:
+            payload["output_uri"] = output_uri
+        if error:
+            payload["error"] = error
+        doc_ref.set(payload, merge=True)
+    except Exception as e:
+        logger.error("session_status_update_failed", extra={"session_id": session_id, "error": str(e)})
+
+def count_channel_renders_today(channel_slug: str) -> Optional[int]:
+    """Return count of renders started today for this channel (best-effort)."""
+    try:
+        utc_now = datetime.utcnow()
+        start_day = utc_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Query renders collection (may need composite index in Firestore).
+        query = (
+            db.collection("renders")
+              .where("channel_slug", "==", channel_slug)
+              .where("created_at", ">=", start_day)
+        )
+        return len(list(query.stream()))
+    except Exception as e:
+        logger.error("quota_query_failed", extra={"channel": channel_slug, "error": str(e)})
+        return None
 
 def download_from_gcs(uri: str, local_path: str):
     """Download file from GCS URI to local path"""
@@ -119,163 +175,152 @@ def create_concat_filter(segments: List[Segment], fps: int) -> str:
     return "".join(filter_parts)
 
 async def process_render(request: RenderRequest):
-    """Main rendering pipeline"""
+    """Main rendering pipeline with structured logging."""
     job_id = request.job_id
     jobs[job_id].status = "processing"
     jobs[job_id].started_at = datetime.utcnow()
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        try:
-            # Download all assets
-            clips = []
-            for i, seg in enumerate(request.edl):
-                clip_path = os.path.join(tmpdir, f"clip_{i}.mp4")
-                download_from_gcs(seg.clip_uri, clip_path)
-                clips.append(clip_path)
-            
-            vo_path = os.path.join(tmpdir, "voiceover.wav")
-            download_from_gcs(request.voiceover_uri, vo_path)
-            
-            # Build FFmpeg command
-            res_params = get_resolution_params(request.resolution, request.aspect_ratio)
-            output_path = os.path.join(tmpdir, "output.mp4")
-            
-            # Create filter complex
-            filter_complex = create_concat_filter(request.edl, request.fps)
-            
-            # Build FFmpeg command
-            cmd = ["ffmpeg", "-y"]
-            
-            # Add video inputs
-            for clip in clips:
-                cmd.extend(["-i", clip])
-            
-            # Add audio input
-            cmd.extend(["-i", vo_path])
-            
-            # Add filter complex
-            cmd.extend(["-filter_complex", filter_complex])
-            
-            # Map outputs
-            cmd.extend(["-map", "[outv]", "-map", f"{len(clips)}:a"])
-            
-            # Video encoding settings
-            cmd.extend([
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "23",
-                "-pix_fmt", "yuv420p",
-                "-r", str(request.fps),
-            ])
-            
-            # Audio encoding settings
-            cmd.extend([
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-ar", "44100",
-            ])
-            
-            # Add metadata
-            if request.metadata:
-                for key, value in request.metadata.items():
-                    cmd.extend(["-metadata", f"{key}={value}"])
-            
-            # Output file
-            cmd.append(output_path)
-            
-            # Execute FFmpeg
-            jobs[job_id].progress = 0.3
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            
-            # Add captions if enabled
-            if request.enable_captions and request.captions_uri:
-                jobs[job_id].progress = 0.6
-                caption_path = os.path.join(tmpdir, "captions.vtt")
-                download_from_gcs(request.captions_uri, caption_path)
-                
-                # Burn in subtitles
-                output_with_captions = os.path.join(tmpdir, "output_captioned.mp4")
-                subtitle_style = request.caption_style or {
-                    "FontName": "Arial",
-                    "FontSize": "24",
-                    "PrimaryColour": "&H00FFFFFF",
-                    "OutlineColour": "&H00000000",
-                    "BorderStyle": "1",
-                    "Outline": "2",
-                    "Shadow": "0",
-                    "MarginV": "20"
+    start_time = time.time()
+    logger.info("render_start", extra={"job_id": job_id, "channel": request.channel_slug, "segments": len(request.edl)})
+
+    async with _semaphore:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                persist_job_status(jobs[job_id])
+                # Download all assets
+                clips = []
+                for i, seg in enumerate(request.edl):
+                    clip_path = os.path.join(tmpdir, f"clip_{i}.mp4")
+                    download_from_gcs(seg.clip_uri, clip_path)
+                    clips.append(clip_path)
+                logger.info("assets_downloaded", extra={"job_id": job_id, "clip_count": len(clips)})
+
+                vo_path = os.path.join(tmpdir, "voiceover.wav")
+                download_from_gcs(request.voiceover_uri, vo_path)
+
+                res_params = get_resolution_params(request.resolution, request.aspect_ratio)
+                output_path = os.path.join(tmpdir, "output.mp4")
+
+                filter_complex = create_concat_filter(request.edl, request.fps)
+                cmd = ["ffmpeg", "-y"]
+                for clip in clips:
+                    cmd.extend(["-i", clip])
+                cmd.extend(["-i", vo_path])
+                cmd.extend(["-filter_complex", filter_complex])
+                cmd.extend(["-map", "[outv]", "-map", f"{len(clips)}:a"])
+                cmd.extend([
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                    "-crf", "23",
+                    "-pix_fmt", "yuv420p",
+                    "-r", str(request.fps),
+                ])
+                cmd.extend([
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    "-ar", "44100",
+                ])
+                if request.metadata:
+                    for key, value in request.metadata.items():
+                        cmd.extend(["-metadata", f"{key}={value}"])
+                cmd.append(output_path)
+
+                jobs[job_id].progress = 0.3
+                persist_job_status(jobs[job_id])
+                logger.info("ffmpeg_invoke", extra={"job_id": job_id, "args": cmd})
+                subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+                if request.enable_captions and request.captions_uri:
+                    jobs[job_id].progress = 0.6
+                    persist_job_status(jobs[job_id])
+                    caption_path = os.path.join(tmpdir, "captions.vtt")
+                    download_from_gcs(request.captions_uri, caption_path)
+                    output_with_captions = os.path.join(tmpdir, "output_captioned.mp4")
+                    subtitle_style = request.caption_style or {
+                        "FontName": "Arial",
+                        "FontSize": "24",
+                        "PrimaryColour": "&H00FFFFFF",
+                        "OutlineColour": "&H00000000",
+                        "BorderStyle": "1",
+                        "Outline": "2",
+                        "Shadow": "0",
+                        "MarginV": "20"
+                    }
+                    subtitle_filter = f"subtitles={caption_path}:force_style='" + ",".join([f"{k}={v}" for k, v in subtitle_style.items()]) + "'"
+                    caption_cmd = [
+                        "ffmpeg", "-y",
+                        "-i", output_path,
+                        "-vf", subtitle_filter,
+                        "-c:a", "copy",
+                        output_with_captions
+                    ]
+                    logger.info("ffmpeg_captions", extra={"job_id": job_id})
+                    subprocess.run(caption_cmd, capture_output=True, text=True, check=True)
+                    output_path = output_with_captions
+
+                jobs[job_id].progress = 0.9
+                persist_job_status(jobs[job_id])
+                output_uri = upload_to_gcs(output_path, request.output_bucket, request.output_path)
+                logger.info("upload_complete", extra={"job_id": job_id, "output_uri": output_uri})
+
+                jobs[job_id].status = "completed"
+                jobs[job_id].output_uri = output_uri
+                jobs[job_id].progress = 1.0
+                jobs[job_id].completed_at = datetime.utcnow()
+
+                render_doc = {
+                    "job_id": job_id,
+                    "channel_slug": request.channel_slug,
+                    "status": "completed",
+                    "output_uri": output_uri,
+                    "aspect_ratio": request.aspect_ratio,
+                    "resolution": request.resolution,
+                    "duration": sum(seg.end_time - seg.start_time for seg in request.edl),
+                    "created_at": jobs[job_id].started_at,
+                    "completed_at": jobs[job_id].completed_at,
+                    "metadata": request.metadata or {}
                 }
-                
-                subtitle_filter = f"subtitles={caption_path}:force_style='"
-                subtitle_filter += ",".join([f"{k}={v}" for k, v in subtitle_style.items()])
-                subtitle_filter += "'"
-                
-                caption_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", output_path,
-                    "-vf", subtitle_filter,
-                    "-c:a", "copy",
-                    output_with_captions
-                ]
-                
-                subprocess.run(caption_cmd, capture_output=True, text=True, check=True)
-                output_path = output_with_captions
-            
-            # Upload to GCS
-            jobs[job_id].progress = 0.9
-            output_uri = upload_to_gcs(
-                output_path,
-                request.output_bucket,
-                request.output_path
-            )
-            
-            # Update job status
-            jobs[job_id].status = "completed"
-            jobs[job_id].output_uri = output_uri
-            jobs[job_id].progress = 1.0
-            jobs[job_id].completed_at = datetime.utcnow()
-            
-            # Save to Firestore
-            render_doc = {
-                "job_id": job_id,
-                "channel_slug": request.channel_slug,
-                "status": "completed",
-                "output_uri": output_uri,
-                "aspect_ratio": request.aspect_ratio,
-                "resolution": request.resolution,
-                "duration": sum(seg.end_time - seg.start_time for seg in request.edl),
-                "created_at": jobs[job_id].started_at,
-                "completed_at": jobs[job_id].completed_at,
-                "metadata": request.metadata or {}
-            }
-            
-            db.collection("renders").document(job_id).set(render_doc)
-            
-        except subprocess.CalledProcessError as e:
-            jobs[job_id].status = "failed"
-            jobs[job_id].error = f"FFmpeg error: {e.stderr}"
-            raise
-        except Exception as e:
-            jobs[job_id].status = "failed"
-            jobs[job_id].error = str(e)
-            raise
+                db.collection("renders").document(job_id).set(render_doc, merge=True)
+                persist_job_status(jobs[job_id])
+                update_session_status(job_id, "completed", output_uri=output_uri)
+                logger.info("render_complete", extra={"job_id": job_id, "elapsed_s": round(time.time() - start_time, 2)})
+            except subprocess.CalledProcessError as e:
+                jobs[job_id].status = "failed"
+                jobs[job_id].error = f"FFmpeg error: {e.stderr}"
+                persist_job_status(jobs[job_id])
+                update_session_status(job_id, "failed", error=jobs[job_id].error)
+                logger.error("ffmpeg_error", extra={"job_id": job_id, "stderr": e.stderr})
+                raise
+            except Exception as e:
+                jobs[job_id].status = "failed"
+                jobs[job_id].error = str(e)
+                persist_job_status(jobs[job_id])
+                update_session_status(job_id, "failed", error=jobs[job_id].error)
+                logger.error("render_failed", extra={"job_id": job_id, "error": str(e)})
+                raise
 
 @app.get("/")
 async def health():
-    return {"status": "healthy", "service": "dpgen-renderer", "version": "1.0.0"}
+    return {"status": "healthy", "service": "deepparallel-renderer", "version": "1.0.0"}
 
 @app.post("/render", response_model=RenderStatus)
 async def create_render(request: RenderRequest, background_tasks: BackgroundTasks):
     """Create a new render job"""
+    # Quota check
+    render_count = count_channel_renders_today(request.channel_slug)
+    if render_count is not None and render_count >= MAX_DAILY_VIDEOS_PER_CHANNEL:
+        logger.warning("quota_exceeded", extra={"channel": request.channel_slug, "count": render_count})
+        raise HTTPException(status_code=429, detail=f"Daily render quota reached for channel {request.channel_slug}")
     
     # Initialize job status
     job_status = RenderStatus(
         job_id=request.job_id,
         status="pending",
         progress=0.0,
-        metadata=request.metadata
+        metadata={**(request.metadata or {}), "channel_slug": request.channel_slug}
     )
     jobs[request.job_id] = job_status
+    # Persist initial pending status
+    persist_job_status(job_status)
     
     # Start background processing
     background_tasks.add_task(process_render, request)
@@ -332,13 +377,18 @@ async def batch_render(requests: List[RenderRequest], background_tasks: Backgrou
     job_ids = []
     
     for request in requests:
+        render_count = count_channel_renders_today(request.channel_slug)
+        if render_count is not None and render_count >= MAX_DAILY_VIDEOS_PER_CHANNEL:
+            logger.warning("quota_exceeded_batch", extra={"channel": request.channel_slug, "count": render_count})
+            continue
         job_status = RenderStatus(
             job_id=request.job_id,
             status="pending",
             progress=0.0,
-            metadata=request.metadata
+            metadata={**(request.metadata or {}), "channel_slug": request.channel_slug}
         )
         jobs[request.job_id] = job_status
+        persist_job_status(job_status)
         background_tasks.add_task(process_render, request)
         job_ids.append(request.job_id)
     

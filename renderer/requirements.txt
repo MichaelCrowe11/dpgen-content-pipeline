@@ -10,3 +10,4 @@ webvtt-py==0.4.6
 redis==5.0.1
 httpx==0.26.0
 python-multipart==0.0.6
+pytest==8.2.1

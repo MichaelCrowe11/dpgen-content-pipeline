@@ -1,5 +1,5 @@
 {
-  "name": "dpgen-scripts",
+  "name": "deepparallel-scripts",
   "version": "1.0.0",
   "description": "Setup scripts for DPGen pipeline",
   "scripts": {

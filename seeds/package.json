@@ -1,5 +1,5 @@
 {
-  "name": "dpgen-firestore-seeds",
+  "name": "deepparallel-firestore-seeds",
   "version": "1.0.0",
   "type": "module",
   "dependencies": {

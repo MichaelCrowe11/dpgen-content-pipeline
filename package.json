@@ -1,10 +1,10 @@
 {
-  "name": "dpgen-pipeline",
+  "name": "deepparallel-pipeline",
   "version": "1.0.0",
   "description": "Multi-agent content creation pipeline with Google AI",
   "scripts": {
     "seed": "cd seeds && npm install && node seed_channels.js",
-    "deploy:renderer": "cd renderer && gcloud run deploy dpgen-renderer --source . --region us-central1 --memory 2Gi --cpu 2 --timeout 600 --allow-unauthenticated",
+    "deploy:renderer": "cd renderer && gcloud run deploy deepparallel-renderer --source . --region us-central1 --memory 2Gi --cpu 2 --timeout 600 --allow-unauthenticated",
     "test:pipeline": "node scripts/test_pipeline.js",
     "monitor": "node scripts/monitor.js"
   },

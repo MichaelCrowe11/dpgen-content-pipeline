@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install renderer deps
+        working-directory: renderer
+        run: |
+          pip install -r requirements.txt
+      
+      - name: Run smoke tests
+        working-directory: renderer
+        run: pytest -q
+
+      - name: Lint workflow template (basic presence)
+        run: |
+          test -f workflows-gcp/main.yaml.tmpl
+
+      - name: Docker build renderer
+        run: |
+          docker build -t renderer-test:latest ./renderer
+
+  # Placeholder deploy job (manual promotion gate)
+  deploy:
+    if: ${{ github.ref == 'refs/heads/master' }}
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://console.cloud.google.com/run
+    steps:
+      - name: Echo deploy placeholder
+        run: echo "Add gcloud auth & deployment steps with secrets (GCP_SA_KEY) here."

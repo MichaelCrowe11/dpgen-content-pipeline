@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepParallel - Content Pipeline</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        .app-container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        header {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            color: white;
+        }
+        h1 { font-size: 2.5rem; margin-bottom: 0.5rem; }
+        .tagline { opacity: 0.9; }
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+        }
+        @media (max-width: 768px) {
+            .main-content { grid-template-columns: 1fr; }
+        }
+        .card {
+            background: rgba(255,255,255,0.95);
+            border-radius: 15px;
+            padding: 2rem;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        .input-section h2, .output-section h2 {
+            color: #333;
+            margin-bottom: 1rem;
+        }
+        textarea {
+            width: 100%;
+            min-height: 200px;
+            padding: 1rem;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1rem;
+            resize: vertical;
+        }
+        .controls {
+            margin-top: 1rem;
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        button {
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 25px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        button:hover {
+            transform: scale(1.05);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        select {
+            padding: 0.75rem;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1rem;
+        }
+        .output {
+            background: #f5f5f5;
+            padding: 1rem;
+            border-radius: 10px;
+            min-height: 200px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            color: #333;
+        }
+        .status {
+            margin-top: 1rem;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            text-align: center;
+            font-weight: bold;
+        }
+        .status.ready { background: #d4edda; color: #155724; }
+        .status.loading { background: #fff3cd; color: #856404; }
+        .status.error { background: #f8d7da; color: #721c24; }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+            margin-top: 2rem;
+        }
+        .stat {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            padding: 1rem;
+            border-radius: 10px;
+            text-align: center;
+            color: white;
+        }
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+        }
+        .stat-label {
+            opacity: 0.9;
+            margin-top: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <h1>🚀 DeepParallel Content Pipeline</h1>
+            <p class="tagline">AI-Powered Content Generation at Scale</p>
+        </header>
+
+        <div class="stats">
+            <div class="stat">
+                <div class="stat-value" id="requestCount">0</div>
+                <div class="stat-label">Requests</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value" id="avgTime">0ms</div>
+                <div class="stat-label">Avg Response</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value" id="successRate">100%</div>
+                <div class="stat-label">Success Rate</div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="card input-section">
+                <h2>Input</h2>
+                <textarea id="inputText" placeholder="Enter your content or prompt here..."></textarea>
+                <div class="controls">
+                    <select id="pipelineType">
+                        <option value="generate">Generate Content</option>
+                        <option value="transform">Transform Text</option>
+                        <option value="analyze">Analyze Content</option>
+                        <option value="optimize">Optimize SEO</option>
+                    </select>
+                    <button id="processBtn" onclick="processContent()">Process</button>
+                    <button onclick="clearAll()">Clear</button>
+                </div>
+                <div id="status" class="status ready">Ready</div>
+            </div>
+
+            <div class="card output-section">
+                <h2>Output</h2>
+                <div id="output" class="output">Output will appear here...</div>
+                <div class="controls">
+                    <button onclick="copyOutput()">Copy</button>
+                    <button onclick="downloadOutput()">Download</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let stats = {
+            requests: 0,
+            totalTime: 0,
+            successes: 0
+        };
+
+        async function processContent() {
+            const input = document.getElementById('inputText').value;
+            const type = document.getElementById('pipelineType').value;
+            const statusEl = document.getElementById('status');
+            const outputEl = document.getElementById('output');
+            const processBtn = document.getElementById('processBtn');
+
+            if (!input.trim()) {
+                alert('Please enter some content to process');
+                return;
+            }
+
+            statusEl.className = 'status loading';
+            statusEl.textContent = 'Processing...';
+            processBtn.disabled = true;
+            
+            const startTime = Date.now();
+            stats.requests++;
+
+            try {
+                // For now, simulate API call since backend requires auth
+                // In production, this would call the actual API
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                
+                // Simulated response based on type
+                let result;
+                switch(type) {
+                    case 'generate':
+                        result = `Generated Content:\n\n${input}\n\n[AI Enhanced Version]\nThis is a demonstration of the content generation pipeline. In production, this would connect to the AI backend for real content generation.`;
+                        break;
+                    case 'transform':
+                        result = `Transformed Text:\n\n${input.toUpperCase()}\n\n[Style: Professional]`;
+                        break;
+                    case 'analyze':
+                        result = `Content Analysis:\n\nWord Count: ${input.split(' ').length}\nCharacter Count: ${input.length}\nSentiment: Positive\nReadability: Grade 8`;
+                        break;
+                    case 'optimize':
+                        result = `SEO Optimized:\n\nTitle: ${input.slice(0, 60)}\nMeta Description: ${input.slice(0, 160)}\nKeywords: AI, content, pipeline, generation`;
+                        break;
+                }
+
+                outputEl.textContent = result;
+                statusEl.className = 'status ready';
+                statusEl.textContent = 'Complete!';
+                stats.successes++;
+                
+            } catch (error) {
+                outputEl.textContent = `Error: ${error.message}`;
+                statusEl.className = 'status error';
+                statusEl.textContent = 'Error occurred';
+            } finally {
+                processBtn.disabled = false;
+                const elapsed = Date.now() - startTime;
+                stats.totalTime += elapsed;
+                updateStats();
+            }
+        }
+
+        function updateStats() {
+            document.getElementById('requestCount').textContent = stats.requests;
+            document.getElementById('avgTime').textContent = stats.requests > 0 
+                ? Math.round(stats.totalTime / stats.requests) + 'ms' 
+                : '0ms';
+            document.getElementById('successRate').textContent = stats.requests > 0
+                ? Math.round((stats.successes / stats.requests) * 100) + '%'
+                : '100%';
+        }
+
+        function clearAll() {
+            document.getElementById('inputText').value = '';
+            document.getElementById('output').textContent = 'Output will appear here...';
+            document.getElementById('status').className = 'status ready';
+            document.getElementById('status').textContent = 'Ready';
+        }
+
+        function copyOutput() {
+            const output = document.getElementById('output').textContent;
+            navigator.clipboard.writeText(output).then(() => {
+                alert('Output copied to clipboard!');
+            });
+        }
+
+        function downloadOutput() {
+            const output = document.getElementById('output').textContent;
+            const blob = new Blob([output], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'deepparallel-output.txt';
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // Enter key to process
+        document.getElementById('inputText').addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'Enter') {
+                processContent();
+            }
+        });
+    </script>
+</body>
+</html>

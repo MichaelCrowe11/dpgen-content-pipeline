@@ -1,0 +1,11 @@
+name = "deepparallel-api"
+main = "cloudflare-worker.js"
+compatibility_date = "2024-09-12"
+account_id = "9f3b1ed688d960bc9ea03569ca840dfd"
+workers_dev = false
+
+[env.production]
+routes = [
+  { pattern = "deepparallel.org/api/*", zone_id = "0dee7676d43422b333b1bc56662c63c4" },
+  { pattern = "deepparallel.org/health", zone_id = "0dee7676d43422b333b1bc56662c63c4" }
+]

@@ -1,4 +1,4 @@
-# DPGen Content Creation Pipeline
+# DeepParallel Content Creation Pipeline
 
 Production-grade, multi-agent content creation pipeline using **100% Google AI** for automated video generation and multi-platform publishing.
 
@@ -19,7 +19,7 @@ You have two GCP projects configured:
 
 ```bash
 # Clone and navigate to project
-cd dpgen-pipeline
+cd deepparallel-pipeline
 
 # Install dependencies
 npm install
@@ -40,7 +40,7 @@ cd ..
 
 # Deploy the renderer
 cd renderer
-gcloud run deploy dpgen-renderer \
+gcloud run deploy deepparallel-renderer \
   --source . \
   --region us-central1 \
   --project content-pipeline-7dd4f
@@ -55,7 +55,7 @@ gcloud workflows deploy content-pipeline \
 ## 📁 Project Structure
 
 ```
-dpgen-pipeline/
+deepparallel-pipeline/
 ├── config/                   # Configuration files
 │   ├── .env                 # Environment variables
 │   ├── service_account.json # GCP service account
@@ -147,16 +147,72 @@ gcloud workflows executions describe EXECUTION_ID \
 ### Check Renderer Status
 ```bash
 # Get renderer URL
-gcloud run services describe dpgen-renderer \
+gcloud run services describe deepparallel-renderer \
   --region=us-central1 \
   --project=content-pipeline-7dd4f \
   --format='value(status.url)'
 
 # Check health
-curl https://dpgen-renderer-xxx.run.app/
+curl https://deepparallel-renderer-xxx.run.app/
 ```
 
-## 🔑 API Keys Required
+## �️ Firestore Indexes
+
+Certain queries (daily quota checks, analytics dashboards, status filtering) require composite indexes. We've added a `firestore.indexes.json` describing recommended indexes and a helper script.
+
+Collections covered:
+- `renders`: query by `channel_slug` + `created_at` range/ordering.
+- `production_sessions`: query by `channel_slug`, `status`, and time ordering.
+
+To create indexes manually:
+```bash
+chmod +x scripts/create-firestore-indexes.sh
+./scripts/create-firestore-indexes.sh
+```
+
+Or deploy via config file (if using Firebase tooling):
+```bash
+gcloud firestore indexes composite create --project $GCP_PROJECT_ID --collection-group=renders \
+  --field-config fieldPath=channel_slug,order=ASCENDING \
+  --field-config fieldPath=created_at,order=DESCENDING
+```
+
+Index propagation can take several minutes. Until then, Firestore may respond with an index suggestion error containing a direct console link you can follow to auto-create.
+
+## 🔐 IAM Separation (Least Privilege)
+
+Two service accounts are used:
+
+1. Workflow Orchestrator: `deepparallel-workflow@<project>.iam.gserviceaccount.com`
+  - Roles: AI Platform User, Firestore (datastore.user), Cloud Run Invoker, Workflows Invoker, Storage Object Viewer, Secret Manager Accessor, Logging Writer, BigQuery Data Editor.
+2. Renderer: `deepparallel-renderer@<project>.iam.gserviceaccount.com`
+  - Roles: Storage Object Admin (consider narrowing later), Firestore (datastore.user), Secret Manager Accessor, Logging Writer.
+
+Create (or re-create) them independently of full deploy:
+```bash
+chmod +x scripts/setup-iam.sh
+./scripts/setup-iam.sh
+```
+
+Override names when deploying:
+```bash
+WORKFLOW_SA_NAME=wf-sa RENDERER_SA_NAME=render-sa ./scripts/deploy.sh
+```
+
+Redeploy renderer with secrets mounted:
+```bash
+gcloud run deploy deepparallel-renderer \
+  --image gcr.io/$GCP_PROJECT_ID/deepparallel-renderer:latest \
+  --region us-central1 \
+  --service-account deepparallel-renderer@$GCP_PROJECT_ID.iam.gserviceaccount.com \
+  --set-secrets CSE_API_KEY=CSE_API_KEY:latest,CSE_CX=CSE_CX:latest \
+  --allow-unauthenticated
+```
+
+Future hardening ideas: bucket-level IAM instead of objectAdmin, restrict ingress on Cloud Run, add VPC egress, use custom roles.
+
+
+## �🔑 API Keys Required
 
 Update these in `config/.env`:
 

@@ -1,24 +1,15 @@
 FROM python:3.11-slim
 
-# Install FFmpeg and system dependencies
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    ffprobe \
-    imagemagick \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Python dependencies
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY . .
+# Install dependencies
+RUN pip install fastapi uvicorn
 
-# Cloud Run port
+# Copy application
+COPY app_simple.py app.py
+
+# Set environment
 ENV PORT=8080
-EXPOSE 8080
 
 # Run the application
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "app.py"]

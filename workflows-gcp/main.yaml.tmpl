@@ -1,5 +1,6 @@
-## NOTE: This file is now generated from main.yaml.tmpl. Edit the template instead.
-## Stubbed Veo job URI extraction & dynamic EDL assembly included.
+## GENERATED WORKFLOW TEMPLATE (edit this file, not the rendered one)
+## Token __RENDERER_URL__ is replaced during deployment.
+## Includes stub logic for Veo job result extraction and dynamic EDL assembly.
 
 # Google Cloud Workflows - Main Content Creation Pipeline
 
@@ -15,15 +16,13 @@ main:
           - aspect_ratio: ${default(map.get(args, "aspect_ratio"), "9:16")}
           - duration_s: ${default(map.get(args, "duration_s"), 60)}
           - session_id: ${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
-    
-    # Step 1: Fetch Channel Profile from Firestore
+
     - fetchChannelProfile:
         call: googleapis.firestore.v1.projects.databases.documents.get
         args:
           name: ${"projects/" + project + "/databases/(default)/documents/channels/" + channel_slug}
         result: channelDoc
-    
-    # Step 2: Fetch Prompts
+
     - fetchPrompts:
         parallel:
           for:
@@ -38,8 +37,7 @@ main:
               - assignPrompt:
                   assign:
                     - prompts[promptId]: ${promptDoc}
-    
-    # Step 3: Generate Topic (if not provided)
+
     - generateTopic:
         switch:
           - condition: ${topic == ""}
@@ -62,8 +60,7 @@ main:
               - extractTopic:
                   assign:
                     - topic: ${topicResponse.body.candidates[0].content.parts[0].text}
-    
-    # Step 4: Creative Director (Showrunner)
+
     - callShowrunner:
         call: http.post
         args:
@@ -79,17 +76,20 @@ main:
               temperature: 0.8
               maxOutputTokens: 2048
               responseMimeType: "application/json"
+        retry:
+          maxRetries: 3
+          initialBackoffSeconds: 5
+          maxBackoffSeconds: 30
+          multiplier: 2
         result: briefResponse
-    
+
     - parseBrief:
         assign:
           - brief: ${json.decode(briefResponse.body.candidates[0].content.parts[0].text)}
-    
-    # Step 5 & 6: Research and Script (Parallel)
+
     - parallelResearchAndScript:
         parallel:
           branches:
-            # Research Branch
             - researchBranch:
                 steps:
                   - searchWeb:
@@ -104,7 +104,6 @@ main:
                           safe: "active"
                           dateRestrict: "m6"
                       result: searchResults
-                  
                   - summarizeResearch:
                       call: http.post
                       args:
@@ -120,13 +119,15 @@ main:
                             temperature: 0.3
                             maxOutputTokens: 2048
                             responseMimeType: "application/json"
+                      retry:
+                        maxRetries: 3
+                        initialBackoffSeconds: 5
+                        maxBackoffSeconds: 25
+                        multiplier: 2
                       result: researchResponse
-                  
                   - assignResearch:
                       assign:
                         - research: ${json.decode(researchResponse.body.candidates[0].content.parts[0].text)}
-            
-            # Script Branch (waits for brief)
             - scriptBranch:
                 steps:
                   - generateScript:
@@ -144,13 +145,16 @@ main:
                             temperature: 0.7
                             maxOutputTokens: 3000
                             responseMimeType: "application/json"
+                      retry:
+                        maxRetries: 3
+                        initialBackoffSeconds: 5
+                        maxBackoffSeconds: 30
+                        multiplier: 2
                       result: scriptResponse
-                  
                   - assignScript:
                       assign:
                         - script: ${json.decode(scriptResponse.body.candidates[0].content.parts[0].text)}
-    
-    # Step 7: Compliance Check
+
     - complianceCheck:
         call: http.post
         args:
@@ -166,24 +170,27 @@ main:
               temperature: 0.2
               maxOutputTokens: 1024
               responseMimeType: "application/json"
+        retry:
+          maxRetries: 2
+          initialBackoffSeconds: 4
+          maxBackoffSeconds: 20
+          multiplier: 2
         result: complianceResponse
-    
+
     - checkComplianceScore:
         assign:
           - compliance: ${json.decode(complianceResponse.body.candidates[0].content.parts[0].text)}
         next: evaluateCompliance
-    
+
     - evaluateCompliance:
         switch:
           - condition: ${compliance.compliance_score < 0.7}
             raise:
               message: ${"Compliance check failed: " + json.encode(compliance.issues)}
-    
-    # Step 8: Generate Media Assets (Parallel)
+
     - generateMediaAssets:
         parallel:
           branches:
-            # Veo Video Generation
             - veoVideos:
                 steps:
                   - buildVeoPrompts:
@@ -201,18 +208,21 @@ main:
                             temperature: 0.8
                             maxOutputTokens: 2048
                             responseMimeType: "application/json"
+                      retry:
+                        maxRetries: 3
+                        initialBackoffSeconds: 5
+                        maxBackoffSeconds: 30
+                        multiplier: 2
                       result: veoPromptsResponse
-                  
                   - parseVeoPrompts:
                       assign:
                         - veoShots: ${json.decode(veoPromptsResponse.body.candidates[0].content.parts[0].text).shots}
-                  
                   - submitVeoJobs:
                       parallel:
                         for:
                           value: shot
                           in: ${veoShots}
-                          range: [0, 4]  # Limit to 5 shots
+                          range: [0, 4]
                           steps:
                             - createVeoJob:
                                 call: http.post
@@ -228,12 +238,15 @@ main:
                                           sampleCount: 1
                                           resolution: "1080p"
                                           duration: ${default(shot.duration, 5)}
+                                retry:
+                                  maxRetries: 2
+                                  initialBackoffSeconds: 10
+                                  maxBackoffSeconds: 40
+                                  multiplier: 2
                                 result: veoJob
                             - assignVeoJob:
                                 assign:
                                   - veoJobs[${index}]: ${veoJob.body.name}
-            
-            # Thumbnail Generation
             - thumbnails:
                 steps:
                   - generateThumbnails:
@@ -255,12 +268,15 @@ main:
                                           sampleCount: 1
                                           aspectRatio: "16:9"
                                           addWatermark: false
+                                retry:
+                                  maxRetries: 2
+                                  initialBackoffSeconds: 6
+                                  maxBackoffSeconds: 24
+                                  multiplier: 2
                                 result: thumbnailResponse
                             - assignThumbnail:
                                 assign:
                                   - thumbnails[variant]: ${thumbnailResponse.body.predictions[0].bytesBase64Encoded}
-            
-            # Voice Generation
             - voiceGeneration:
                 steps:
                   - synthesizeVoice:
@@ -279,8 +295,7 @@ main:
                   - assignAudio:
                       assign:
                         - audioBase64: ${audioResponse.audioContent}
-    
-    # Step 9: Save Assets to Cloud Storage
+
     - saveAssets:
         parallel:
           branches:
@@ -292,7 +307,6 @@ main:
                   uploadType: "media"
                   body: ${base64.decode(audioBase64)}
                 result: audioObject
-            
             - saveThumbnails:
                 parallel:
                   for:
@@ -306,8 +320,7 @@ main:
                             name: ${"sessions/" + session_id + "/thumbnails/variant_" + variant + ".png"}
                             uploadType: "media"
                             body: ${base64.decode(thumbnails[variant])}
-    
-    # Step 10: Wait for Veo Jobs to Complete
+
     - waitForVeoJobs:
         parallel:
           for:
@@ -339,6 +352,10 @@ main:
               - veoFallback:
                   assign:
                     - veoVideoUris[${index}]: ${default(veoVideoUris[${index}], "gs://" + channelDoc.fields.gcs_bucket.stringValue.replace("gs://", "") + "/sessions/" + session_id + "/videos/fallback_" + string(index) + ".mp4")}
+              - extractVeoUri:
+                  assign:
+                    # NOTE: Actual field path may differ; adjust when real response shape is confirmed.
+                    - veoVideoUris[${index}]: ${default(veoStatus.body.metadata.output.videos[0].gcsUri, "gs://" + channelDoc.fields.gcs_bucket.stringValue.replace("gs://", "") + "/sessions/" + session_id + "/videos/shot_" + string(index) + ".mp4")}
 
     - buildEdl:
         assign:
@@ -358,8 +375,7 @@ main:
                         start_time: 0
                         end_time: 5
                         transition: "cut"
-    
-    # Step 11: Create Render Job
+
     - createRenderJob:
         call: http.post
         args:
@@ -377,8 +393,7 @@ main:
             resolution: "1080p"
             enable_captions: true
         result: renderJob
-    
-    # Step 12: Generate Distribution Metadata
+
     - generateDistribution:
         call: http.post
         args:
@@ -395,12 +410,11 @@ main:
               maxOutputTokens: 1024
               responseMimeType: "application/json"
         result: distributionResponse
-    
+
     - parseDistribution:
         assign:
           - distribution: ${json.decode(distributionResponse.body.candidates[0].content.parts[0].text)}
-    
-    # Step 13: Save Session to Firestore
+
     - saveSession:
         call: googleapis.firestore.v1.projects.databases.documents.createDocument
         args:
@@ -416,8 +430,7 @@ main:
               created_at: { timestampValue: ${time.format(sys.now())} }
               render_job_id: { stringValue: ${renderJob.body.job_id} }
               distribution: { mapValue: { fields: ${distribution} } }
-    
-    # Step 14: Return Results
+
     - returnResults:
         return:
           session_id: ${session_id}

@@ -1,0 +1,4 @@
+# Cloudflare Pages redirects for API proxy
+/api/* https://dpgen-renderer-29690876826.us-central1.run.app/api/:splat 200
+/health https://dpgen-renderer-29690876826.us-central1.run.app/health 200
+/docs https://dpgen-renderer-29690876826.us-central1.run.app/docs 200
