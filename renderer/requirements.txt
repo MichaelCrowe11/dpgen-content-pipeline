@@ -4,10 +4,10 @@ pydantic==2.5.3
 google-cloud-storage==2.14.0
 google-cloud-firestore==2.14.0
 ffmpeg-python==0.2.0
-pillow==10.2.0
+pillow==10.3.0
 numpy==1.26.3
 webvtt-py==0.4.6
 redis==5.0.1
 httpx==0.26.0
-python-multipart==0.0.6
+python-multipart==0.0.18
 pytest==8.2.1
