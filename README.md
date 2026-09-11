@@ -1,291 +1,78 @@
-# DeepParallel Content Creation Pipeline
-
-Production-grade, multi-agent content creation pipeline using **100% Google AI** for automated video generation and multi-platform publishing.
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Google Cloud Project with billing enabled
-- Node.js 18+ 
-- gcloud CLI installed and configured
-
-### Project Setup
-
-You have two GCP projects configured:
-1. **content-pipeline-7dd4f** - Main project with Firebase/Firestore (service account provided)
-2. **tenacious-cocoa-471700-i9** - OAuth2 credentials for API access
-
-### Installation
-
-```bash
-# Clone and navigate to project
-cd deepparallel-pipeline
-
-# Install dependencies
-npm install
-
-# Set up environment
-cp config/.env.example config/.env
-# Your credentials are already configured in config/
-
-# Initialize GCP project
-chmod +x scripts/setup-project.sh
-./scripts/setup-project.sh
-
-# Seed the database
-cd seeds
-npm install
-node seed_channels.js
-cd ..
-
-# Deploy the renderer
-cd renderer
-gcloud run deploy deepparallel-renderer \
-  --source . \
-  --region us-central1 \
-  --project content-pipeline-7dd4f
-
-# Deploy workflows (recommended over Pipedream)
-gcloud workflows deploy content-pipeline \
-  --source workflows-gcp/main.yaml \
-  --location us-central1 \
-  --project content-pipeline-7dd4f
-```
-
-## 📁 Project Structure
-
-```
-deepparallel-pipeline/
-├── config/                   # Configuration files
-│   ├── .env                 # Environment variables
-│   ├── service_account.json # GCP service account
-│   └── oauth_credentials.json # OAuth2 credentials
-├── seeds/                    # Firestore seeding scripts
-│   └── seed_channels.js     # 8 pre-configured channels
-├── renderer/                 # Cloud Run video renderer
-│   ├── app.py               # FastAPI renderer service
-│   ├── Dockerfile           # Container configuration
-│   └── requirements.txt     # Python dependencies
-├── workflows-gcp/           # Google Cloud Workflows
-│   └── main.yaml           # Main orchestration workflow
-├── workflows/               # Alternative Pipedream workflows
-│   ├── parent_workflow.js  # Main pipeline
-│   ├── publish_workflow.js # Multi-platform publishing
-│   └── analytics_workflow.js # Performance tracking
-└── scripts/                 # Deployment scripts
-    ├── deploy.sh           # Full deployment script
-    └── setup-project.sh    # Quick setup script
-```
-
-## 🎬 8 Pre-Configured Channels
-
-1. **Circuit Myth** - Tech myths & benchmarks
-2. **DeepTime Microhistory** - 60-120s history shorts
-3. **Zero-View Science** - Everyday physics demos
-4. **Map Oddities** - Geographic quirks
-5. **Space Minute** - Space explainers
-6. **Design Details** - Industrial design insights
-7. **Pattern Language** - Productivity/AI workflows
-8. **Econ Snack** - Economic literacy
-
-## 🔧 Pipeline Components
-
-### Multi-Agent System
-- **Creative Director** - Episode planning & hooks
-- **Research Agent** - Web search & fact-checking
-- **Scriptwriter** - SSML script generation
-- **Visual Director** - Veo prompt generation
-- **Compliance Agent** - Safety & policy checks
-- **Distribution Producer** - Platform-specific metadata
-
-### Google AI Services Used
-- **Gemini 2.5 Pro/Flash** - Agent reasoning
-- **Veo 3** - Text-to-video generation
-- **Imagen 3/4** - Thumbnail generation
-- **Cloud Text-to-Speech** - Voice synthesis
-- **Vision SafeSearch** - Content safety
-- **Video Intelligence API** - Video analysis
-
-### Storage & Data
-- **Firestore** - Channel profiles & sessions
-- **Cloud Storage** - Media assets
-- **BigQuery** - Analytics data lake
-
-## 🚦 Running the Pipeline
-
-### Manual Trigger
-```bash
-# Test with specific topic
-gcloud workflows run content-pipeline \
-  --data='{"channel_slug":"circuit-myth","topic":"Do SSDs really last longer?"}' \
-  --project=content-pipeline-7dd4f
-
-# Auto-generate trending topic
-gcloud workflows run content-pipeline \
-  --data='{"channel_slug":"space-minute"}' \
-  --project=content-pipeline-7dd4f
-```
-
-### Scheduled Runs
-The pipeline automatically runs twice daily (12:30 PM and 7:30 PM Phoenix time) for each channel.
-
-## 📊 Monitoring
-
-### View Workflow Executions
-```bash
-# List recent executions
-gcloud workflows executions list \
-  --workflow=content-pipeline \
-  --project=content-pipeline-7dd4f
-
-# View specific execution
-gcloud workflows executions describe EXECUTION_ID \
-  --workflow=content-pipeline \
-  --project=content-pipeline-7dd4f
-```
-
-### Check Renderer Status
-```bash
-# Get renderer URL
-gcloud run services describe deepparallel-renderer \
-  --region=us-central1 \
-  --project=content-pipeline-7dd4f \
-  --format='value(status.url)'
-
-# Check health
-curl https://deepparallel-renderer-xxx.run.app/
-```
-
-## �️ Firestore Indexes
-
-Certain queries (daily quota checks, analytics dashboards, status filtering) require composite indexes. We've added a `firestore.indexes.json` describing recommended indexes and a helper script.
-
-Collections covered:
-- `renders`: query by `channel_slug` + `created_at` range/ordering.
-- `production_sessions`: query by `channel_slug`, `status`, and time ordering.
-
-To create indexes manually:
-```bash
-chmod +x scripts/create-firestore-indexes.sh
-./scripts/create-firestore-indexes.sh
-```
-
-Or deploy via config file (if using Firebase tooling):
-```bash
-gcloud firestore indexes composite create --project $GCP_PROJECT_ID --collection-group=renders \
-  --field-config fieldPath=channel_slug,order=ASCENDING \
-  --field-config fieldPath=created_at,order=DESCENDING
-```
-
-Index propagation can take several minutes. Until then, Firestore may respond with an index suggestion error containing a direct console link you can follow to auto-create.
-
-## 🔐 IAM Separation (Least Privilege)
-
-Two service accounts are used:
-
-1. Workflow Orchestrator: `deepparallel-workflow@<project>.iam.gserviceaccount.com`
-  - Roles: AI Platform User, Firestore (datastore.user), Cloud Run Invoker, Workflows Invoker, Storage Object Viewer, Secret Manager Accessor, Logging Writer, BigQuery Data Editor.
-2. Renderer: `deepparallel-renderer@<project>.iam.gserviceaccount.com`
-  - Roles: Storage Object Admin (consider narrowing later), Firestore (datastore.user), Secret Manager Accessor, Logging Writer.
-
-Create (or re-create) them independently of full deploy:
-```bash
-chmod +x scripts/setup-iam.sh
-./scripts/setup-iam.sh
-```
-
-Override names when deploying:
-```bash
-WORKFLOW_SA_NAME=wf-sa RENDERER_SA_NAME=render-sa ./scripts/deploy.sh
-```
-
-Redeploy renderer with secrets mounted:
-```bash
-gcloud run deploy deepparallel-renderer \
-  --image gcr.io/$GCP_PROJECT_ID/deepparallel-renderer:latest \
-  --region us-central1 \
-  --service-account deepparallel-renderer@$GCP_PROJECT_ID.iam.gserviceaccount.com \
-  --set-secrets CSE_API_KEY=CSE_API_KEY:latest,CSE_CX=CSE_CX:latest \
-  --allow-unauthenticated
-```
-
-Future hardening ideas: bucket-level IAM instead of objectAdmin, restrict ingress on Cloud Run, add VPC egress, use custom roles.
-
-
-## �🔑 API Keys Required
-
-Update these in `config/.env`:
-
-1. **Custom Search API** 
-   - Enable at: https://console.cloud.google.com/apis/library/customsearch.googleapis.com
-   - Get key at: https://console.cloud.google.com/apis/credentials
-   - Create search engine: https://programmablesearchengine.google.com/
-
-2. **YouTube Data API**
-   - Enable at: https://console.cloud.google.com/apis/library/youtube.googleapis.com
-   - OAuth2 setup required for uploads
-
-3. **Platform APIs** (Optional for publishing)
-   - TikTok Content API
-   - Meta (Instagram/Facebook) Graph API
-
-## 🛠️ Troubleshooting
-
-### Common Issues
-
-1. **Firestore not initialized**
-```bash
-gcloud firestore databases create --location=us-central1
-```
-
-2. **Missing APIs**
-```bash
-gcloud services enable aiplatform.googleapis.com firestore.googleapis.com
-```
-
-3. **Insufficient permissions**
-```bash
-# Grant necessary roles to service account
-gcloud projects add-iam-policy-binding content-pipeline-7dd4f \
-  --member="serviceAccount:firebase-adminsdk-fbsvc@content-pipeline-7dd4f.iam.gserviceaccount.com" \
-  --role="roles/aiplatform.user"
-```
-
-## 📈 Performance & Costs
-
-### Estimated Costs (per video)
-- Gemini API calls: ~$0.05
-- Veo generation: ~$0.10
-- Imagen thumbnails: ~$0.02
-- Cloud TTS: ~$0.01
-- Storage/Compute: ~$0.02
-- **Total: ~$0.20 per video**
-
-### Optimization Tips
-- Cache evergreen B-roll clips
-- Reuse voice segments for common CTAs
-- Batch thumbnail generation
-- Use Gemini Flash for non-critical tasks
-
-## 🎯 Next Steps
-
-1. **Get API Keys** - Set up Custom Search and YouTube APIs
-2. **Test Pipeline** - Run a test video for one channel
-3. **Monitor Performance** - Check BigQuery analytics
-4. **Scale Gradually** - Start with 1 channel, expand to all 8
-5. **Customize Prompts** - Tune agent prompts for your style
-
-## 📝 License
-
-MIT
-
-## 🤝 Support
-
-For issues or questions, check the logs:
-```bash
-gcloud logging read "resource.type=cloud_function" --limit 50
-```
-
----
-
-Built with 🔥 using Google Cloud AI
+# dpgen-content-pipeline
+
+Video content pipeline scaffold for eight YouTube channels: a FastAPI renderer for Cloud Run, Google Cloud Workflows and Pipedream definitions that call Gemini, Veo, Imagen and Cloud Text-to-Speech, Firestore seed data, and a Cloudflare Worker proxy for deepparallel.org; only the renderer runs locally today.
+
+## Status
+
+experimental
+
+Six commits between 2025-09-10 and 2025-09-12 (`git log`), nothing since. On 2026-09-11 the renderer installed from its own `requirements.txt`, passed its one test and served its health route, and the `seeds/` and `scripts/` packages installed from their lockfiles. Nothing that touches Google Cloud, YouTube or Cloudflare was run.
+
+What does not work:
+
+- CI (`.github/workflows/ci.yml`) failed on all three runs, including the only push to `master` (2025-09-12, job `build-and-test`); the `deploy` job is an `echo` placeholder.
+- Root `package.json` scripts point at files that do not exist: `test:pipeline` calls `scripts/test_pipeline.js` (the file is `scripts/test-pipeline.js`) and `monitor` calls `scripts/monitor.js` (absent). The root `package-lock.json` lists no packages.
+- `deepparallel.org` answers every path with a Cloudflare managed challenge (HTTP 403, `cf-mitigated: challenge`), so `/health` and `/api/*` from `wrangler.toml` cannot be reached with curl. `deepparallel.pages.dev` does not resolve. The Cloud Run renderer URL in the guides (`dpgen-renderer-29690876826.us-central1.run.app`) returns HTTP 403 to a browser agent and a Google 503 error page to a plain GET.
+- Two Dependabot PRs (#1 pip, #2 npm) are open and unmerged.
+- No LICENSE file.
+
+## Install and first run
+
+Run on 2026-09-11 (macOS, uv, Python 3.11.15, Node 26.5.0, npm 11.17.0):
+
+    cd renderer
+    uv venv --python 3.11 .venv
+    uv pip install --python .venv/bin/python -r requirements.txt
+    (exit 0)
+
+    .venv/bin/python -m pytest -q
+    1 passed, 2 warnings in 5.23s
+
+    .venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 3972
+    curl http://127.0.0.1:3972/
+    {"status":"healthy","service":"deepparallel-renderer","version":"1.0.0"}
+    curl http://127.0.0.1:3972/jobs
+    {"jobs":[],"total":0,"limit":10,"offset":0}
+
+    cd seeds && npm ci
+    added 110 packages in 1s
+    cd scripts && npm ci
+    added 46 packages in 1s
+
+Not run, and why:
+
+- `node seeds/seed_channels.js`: writes to Firestore; needs `GCP_PROJECT_ID` and Google credentials.
+- `scripts/test-pipeline.js`: calls the Vertex `gemini-2.5-flash` endpoint for project `content-pipeline-7dd4f`; paid and keyed.
+- `POST /render`: needs Cloud Storage, Firestore and ffmpeg; not exercised.
+- `docker build` (three renderer Dockerfiles), `gcloud run deploy`, `wrangler deploy`, `firebase deploy`, and every script under `scripts/` and `monetization/`: they create or change cloud resources.
+
+## What runs today
+
+- `renderer/app.py`: FastAPI app with `GET /`, `GET /jobs`, `POST /render`, `GET /render/{job_id}`, `POST /render/{job_id}/cancel`, `POST /batch-render`. `GET /` and `GET /jobs` were probed; `renderer/test_smoke.py` covers `GET /`.
+- `seeds/seed_channels.js`: defines eight channels (`circuit-myth`, `deeptime-microhistory`, `zero-view-science`, `map-oddities`, `space-minute`, `design-details`, `pattern-language`, `econ-snack`) for Firestore. Installs; not run.
+- `workflows-gcp/main.yaml` (generated from `main.yaml.tmpl`): a Google Cloud Workflows definition. `workflows/*.js`: three Pipedream workflow objects (parent, publish, analytics). `agents/quality-validator.js`, `monitoring/*.js`, `enhancements/viral-predictor.js`, `monetization/*.js`: Node scripts that parse (`node --check`) and were not run.
+- `cloudflare-worker.js` with `wrangler.toml`: proxies `deepparallel.org/api/*` and `/health` to Cloud Run with CORS headers. Parses; not deployed today.
+- Nine markdown guides in the root, plus `docs/` and `public/` static pages for the domain.
+
+## Roadmap
+
+- Point the root `test:pipeline` script at `scripts/test-pipeline.js`; add or delete `monitor`.
+- Make `ci.yml` pass once, or remove it.
+- Decide whether `deepparallel.org` and the Cloud Run renderer stay up; both fail from outside today.
+- Add a LICENSE file that matches the `MIT` field in `package.json`.
+
+## Limits
+
+- Not a product. The repository holds no rendered video, run log or published output; whether a video was ever produced from this code cannot be shown from the tree.
+- The old README's cost estimate (about $0.20 per video) and `MONETIZATION_STRATEGY.md`'s revenue projections ($20,000 to 100,000+ monthly, per-stream ranges, percentage confidence) have no invoice, analytics export or data behind them in this repository. Treat them as withdrawn.
+- `enhancements/viral-predictor.js`, `monetization/revenue-optimizer.js`, `sponsorship-matcher.js`, `affiliate-engine.js`, `course-creator.js` and `merch-generator.js` are scripts without data, models or tests. Do not use their output for decisions.
+- Placeholders: `REPLACE_ME` for `CSE_CX` and `CSE_API_KEY` in `seeds/seed_channels.js`; `deepparallel-renderer-xxx.run.app` in the guides. The old README's line "Your credentials are already configured in config/" is false; `config/` holds only `.env.example`.
+- `wrangler.toml` carries a Cloudflare account ID and zone ID, and `scripts/test-pipeline.js` hard-codes the GCP project `content-pipeline-7dd4f`. These are identifiers, not secrets, but they tie the code to one account.
+- `renderer/app.py` constructs Cloud Storage and Firestore clients at import time. The routes probed today did not use them.
+- Where credentials are supplied, prompts, scripts and media go to Google Cloud and uploads go to YouTube. No data handling promise is made.
+
+## License and contact
+
+No license file. `package.json` says `MIT`; no `LICENSE` file backs it.
+
+Contact: michael@crowelogic.com
